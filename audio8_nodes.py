@@ -190,14 +190,33 @@ class Audio8TTSNode:
         # ------------------------------------------------------------------
         # Decode to waveform
         # ------------------------------------------------------------------
-        waveforms, waveform_lengths = model.decode_audio(output.codes)
-        audio_np = waveforms[0, : int(waveform_lengths[0])].float().cpu().numpy()
+        # `output.codes` holds the acoustic codec tokens.
+        # Fallback to `output.sequences` if `.codes` is missing (version diff).
+        codes = getattr(output, "codes", None) or getattr(output, "sequences", None)
+        if codes is None:
+            raise RuntimeError(
+                "[Audio8-TTS] Could not find codec codes in model output. "
+                f"Available keys: {list(output.keys()) if hasattr(output, 'keys') else dir(output)}"
+            )
 
-        out_sr = model.config.codec_sample_rate
-        # Shape expected by ComfyUI: [B, C, S]
-        audio_tensor = torch.from_numpy(audio_np).unsqueeze(0).unsqueeze(0)
+        waveforms, waveform_lengths = model.decode_audio(codes)
 
-        print(f"[Audio8-TTS] Done — {audio_tensor.shape[-1] / out_sr:.2f}s @ {out_sr} Hz")
+        # waveforms shape: (batch, num_samples) — 2D mono
+        valid_len = int(waveform_lengths[0])
+        audio_1d = waveforms[0, :valid_len].float().cpu()
+
+        # Clamp to [-1, 1] to avoid clipping artifacts
+        audio_1d = torch.clamp(audio_1d, -1.0, 1.0)
+
+        out_sr = int(model.config.codec_sample_rate)
+
+        # ComfyUI expects: [B, C, S]
+        audio_tensor = audio_1d.unsqueeze(0).unsqueeze(0)  # [1, 1, S]
+
+        print(
+            f"[Audio8-TTS] Done — {valid_len / out_sr:.2f}s @ {out_sr} Hz "
+            f"| shape={list(audio_tensor.shape)} | max_amp={audio_1d.abs().max():.4f}"
+        )
         return ({"waveform": audio_tensor, "sample_rate": out_sr},)
 
 
