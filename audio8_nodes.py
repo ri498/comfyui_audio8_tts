@@ -94,10 +94,6 @@ class Audio8TTSNode:
                     "FLOAT",
                     {"default": 0.9, "min": 0.1, "max": 1.0, "step": 0.05},
                 ),
-                "repetition_penalty": (
-                    "FLOAT",
-                    {"default": 1.1, "min": 1.0, "max": 2.0, "step": 0.05},
-                ),
                 "max_new_tokens": (
                     "INT",
                     {"default": 512, "min": 64, "max": 2048, "step": 64},
@@ -131,7 +127,6 @@ class Audio8TTSNode:
         speed: float,
         temperature: float,
         top_p: float,
-        repetition_penalty: float,
         max_new_tokens: int,
         reference_audio=None,
         reference_text: str = "",
@@ -191,7 +186,7 @@ class Audio8TTSNode:
         # ------------------------------------------------------------------
         # Generate Audio
         # ------------------------------------------------------------------
-        print(f"[Audio8-TTS] Synthesizing… temp={temperature} top_p={top_p} rep_pen={repetition_penalty} max_tokens={max_new_tokens}")
+        print(f"[Audio8-TTS] Synthesizing… temp={temperature} top_p={top_p} max_tokens={max_new_tokens}")
         with torch.inference_mode():
             if hasattr(model, "generate_audio"):
                 waveforms, lengths, codes = model.generate_audio(
@@ -200,7 +195,6 @@ class Audio8TTSNode:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=50,
-                    repetition_penalty=repetition_penalty,
                     do_sample=True,
                 )
             else:
@@ -210,7 +204,6 @@ class Audio8TTSNode:
                     temperature=temperature,
                     top_p=top_p,
                     top_k=50,
-                    repetition_penalty=repetition_penalty,
                     do_sample=True,
                     return_dict_in_generate=True,
                 )
