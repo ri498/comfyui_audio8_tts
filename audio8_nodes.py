@@ -192,7 +192,9 @@ class Audio8TTSNode:
         # ------------------------------------------------------------------
         # `output.codes` holds the acoustic codec tokens.
         # Fallback to `output.sequences` if `.codes` is missing (version diff).
-        codes = getattr(output, "codes", None) or getattr(output, "sequences", None)
+        codes = getattr(output, "codes", None)
+        if codes is None:
+            codes = getattr(output, "sequences", None)
         if codes is None:
             raise RuntimeError(
                 "[Audio8-TTS] Could not find codec codes in model output. "
