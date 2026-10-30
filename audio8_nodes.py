@@ -51,7 +51,7 @@ def _load_model(model_size: str, device: torch.device):
                 repo_id,
                 cache_dir=local_dir,
                 trust_remote_code=True,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
             .eval()
             .to(device)
@@ -79,7 +79,7 @@ class Audio8TTSNode:
                 ),
                 "model_size": (["0.6b", "0.1b"], {"default": "0.6b"}),
                 "language": (
-                    ["en", "zh", "ja", "es", "fr", "de"],
+                    ["en", "zh", "ja", "es", "fr", "de", "pt", "it", "ko", "ar", "ru", "nl", "pl", "tr", "sv"],
                     {"default": "en"},
                 ),
                 "speed": (
