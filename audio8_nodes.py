@@ -169,3 +169,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Audio8TTSNode": "Audio8 Text-to-Speech",
     "Audio8ModelLoaderNode": "Audio8 Model Loader",
 }
+

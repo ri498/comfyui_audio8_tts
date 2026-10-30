@@ -68,3 +68,4 @@ Weights are downloaded automatically from HuggingFace on first use and cached un
 ## License
 
 See [Audio8 TTS repository](https://github.com/Edge0-AI/Audio8_TTS) for model license.
+
