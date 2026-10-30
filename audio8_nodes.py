@@ -165,7 +165,6 @@ class Audio8TTSNode:
                 text=[text.strip()],
                 reference_audio=[tmp_path],
                 reference_text=[clean_ref_text],
-                language=language,
                 return_tensors="pt",
             )
             if os.path.exists(tmp_path):
@@ -179,7 +178,6 @@ class Audio8TTSNode:
             print("[Audio8-TTS] Generating speech (standard TTS, no reference)")
             inputs = processor(
                 text=[text.strip()],
-                language=language,
                 return_tensors="pt",
             )
 
@@ -198,7 +196,6 @@ class Audio8TTSNode:
                     top_p=top_p,
                     top_k=50,
                     do_sample=True,
-                    speed=speed,
                 )
             else:
                 output = model.generate(
@@ -209,7 +206,6 @@ class Audio8TTSNode:
                     top_k=50,
                     do_sample=True,
                     return_dict_in_generate=True,
-                    speed=speed,
                 )
                 codes = getattr(output, "codes", None)
                 if codes is None:
