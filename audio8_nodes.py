@@ -165,6 +165,7 @@ class Audio8TTSNode:
                 text=[text.strip()],
                 reference_audio=[tmp_path],
                 reference_text=[clean_ref_text],
+                language=language,
                 return_tensors="pt",
             )
             if os.path.exists(tmp_path):
@@ -178,6 +179,7 @@ class Audio8TTSNode:
             print("[Audio8-TTS] Generating speech (standard TTS, no reference)")
             inputs = processor(
                 text=[text.strip()],
+                language=language,
                 return_tensors="pt",
             )
 
@@ -186,7 +188,7 @@ class Audio8TTSNode:
         # ------------------------------------------------------------------
         # Generate Audio
         # ------------------------------------------------------------------
-        print(f"[Audio8-TTS] Synthesizing… temp={temperature} top_p={top_p} max_tokens={max_new_tokens}")
+        print(f"[Audio8-TTS] Synthesizing… temp={temperature} top_p={top_p} max_tokens={max_new_tokens} speed={speed} lang={language}")
         with torch.inference_mode():
             if hasattr(model, "generate_audio"):
                 waveforms, lengths, codes = model.generate_audio(
@@ -196,6 +198,7 @@ class Audio8TTSNode:
                     top_p=top_p,
                     top_k=50,
                     do_sample=True,
+                    speed=speed,
                 )
             else:
                 output = model.generate(
@@ -206,16 +209,37 @@ class Audio8TTSNode:
                     top_k=50,
                     do_sample=True,
                     return_dict_in_generate=True,
+                    speed=speed,
                 )
                 codes = getattr(output, "codes", None)
                 if codes is None:
                     codes = getattr(output, "sequences", None)
                 waveforms, lengths = model.decode_audio(codes)
 
-        valid_len = int(lengths[0]) if lengths is not None and lengths.numel() > 0 else waveforms.shape[-1]
-        audio_1d = waveforms[0, :valid_len].float().cpu()
+        # ------------------------------------------------------------------
+        # Normalize model output to [B, C, S].
+        # decode_audio / generate_audio may return [B, S] (mono), [B, C, S], or [S].
+        # ------------------------------------------------------------------
+        waveforms = waveforms.float().cpu()
+        if waveforms.ndim == 2:
+            # [B, S] -> [B, 1, S]
+            waveforms = waveforms.unsqueeze(1)
+        elif waveforms.ndim == 1:
+            # [S] -> [B=1, C=1, S]
+            waveforms = waveforms.unsqueeze(0).unsqueeze(1)
+        # Now waveforms is guaranteed [B, C, S]
 
-        # Clamp to [-1, 1] to avoid clipping
+        if lengths is not None and lengths.numel() > 0:
+            valid_len = int(lengths[0])
+        else:
+            valid_len = waveforms.shape[-1]
+        # Clamp valid_len to actual audio length
+        valid_len = max(0, min(valid_len, waveforms.shape[-1]))
+
+        # Downmix channels to mono and take first batch item -> [S]
+        audio_1d = waveforms[0, :, :valid_len].mean(dim=0)
+
+        # Clamp to [-1, 1] to avoid clipping / clicks
         audio_1d = torch.clamp(audio_1d, -1.0, 1.0)
 
         out_sr = int(getattr(model.config, "codec_sample_rate", 44100))
