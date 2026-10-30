@@ -88,11 +88,19 @@ class Audio8TTSNode:
                 ),
                 "temperature": (
                     "FLOAT",
-                    {"default": 0.8, "min": 0.1, "max": 1.5, "step": 0.05},
+                    {"default": 0.7, "min": 0.1, "max": 1.5, "step": 0.05},
+                ),
+                "top_p": (
+                    "FLOAT",
+                    {"default": 0.9, "min": 0.1, "max": 1.0, "step": 0.05},
+                ),
+                "repetition_penalty": (
+                    "FLOAT",
+                    {"default": 1.1, "min": 1.0, "max": 2.0, "step": 0.05},
                 ),
                 "max_new_tokens": (
                     "INT",
-                    {"default": 1024, "min": 128, "max": 4096, "step": 128},
+                    {"default": 512, "min": 64, "max": 2048, "step": 64},
                 ),
             },
             "optional": {
@@ -122,6 +130,8 @@ class Audio8TTSNode:
         language: str,
         speed: float,
         temperature: float,
+        top_p: float,
+        repetition_penalty: float,
         max_new_tokens: int,
         reference_audio=None,
         reference_text: str = "",
@@ -134,90 +144,96 @@ class Audio8TTSNode:
         # ------------------------------------------------------------------
         # Build processor inputs
         # ------------------------------------------------------------------
-        use_cloning = reference_audio is not None and reference_text.strip()
+        use_cloning = reference_audio is not None and bool(reference_text.strip())
 
         if use_cloning:
-            # Save reference waveform to a temp WAV so the processor can read it
             waveform = reference_audio["waveform"]   # [B, C, S]
-            sr = reference_audio["sample_rate"]
+            sr = int(reference_audio["sample_rate"])
 
-            # Flatten to mono [S] for saving
-            wav_mono = waveform[0].mean(dim=0).cpu().float()
+            # Downmix to 1D mono tensor [S]
+            if waveform.ndim == 3:
+                wav_mono = waveform[0].mean(dim=0).cpu().float()
+            elif waveform.ndim == 2:
+                wav_mono = waveform.mean(dim=0).cpu().float()
+            else:
+                wav_mono = waveform.view(-1).cpu().float()
 
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp_path = tmp.name
             torchaudio.save(tmp_path, wav_mono.unsqueeze(0), sr)
 
+            clean_ref_text = " ".join(reference_text.strip().split())
             print(
-                f"[Audio8-TTS] Zero-shot cloning | ref_text='{reference_text[:60]}…'"
+                f"[Audio8-TTS] Zero-shot cloning | sr={sr} | ref_text='{clean_ref_text[:60]}…'"
             )
             inputs = processor(
-                text=[text],
+                text=[text.strip()],
                 reference_audio=[tmp_path],
-                reference_text=[reference_text.strip()],
+                reference_text=[clean_ref_text],
                 return_tensors="pt",
             )
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         else:
             if reference_audio is not None and not reference_text.strip():
                 print(
                     "[Audio8-TTS] WARNING: reference_audio provided but reference_text is empty — "
-                    "running without voice cloning. Add the exact transcript for cloning."
+                    "running without voice cloning. Provide exact transcript for cloning."
                 )
-            print(f"[Audio8-TTS] Generating speech (no voice cloning)")
+            print("[Audio8-TTS] Generating speech (standard TTS, no reference)")
             inputs = processor(
-                text=[text],
+                text=[text.strip()],
                 return_tensors="pt",
             )
 
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         # ------------------------------------------------------------------
-        # Generate
+        # Generate Audio
         # ------------------------------------------------------------------
-        print(f"[Audio8-TTS] Synthesising… lang={language} speed={speed} temp={temperature}")
+        print(f"[Audio8-TTS] Synthesizing… temp={temperature} top_p={top_p} rep_pen={repetition_penalty} max_tokens={max_new_tokens}")
         with torch.inference_mode():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=0.95,
-                top_k=50,
-                do_sample=True,
-                return_dict_in_generate=True,
-            )
+            if hasattr(model, "generate_audio"):
+                waveforms, lengths, codes = model.generate_audio(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=50,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=True,
+                )
+            else:
+                output = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=50,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=True,
+                    return_dict_in_generate=True,
+                )
+                codes = getattr(output, "codes", None)
+                if codes is None:
+                    codes = getattr(output, "sequences", None)
+                waveforms, lengths = model.decode_audio(codes)
 
-        # ------------------------------------------------------------------
-        # Decode to waveform
-        # ------------------------------------------------------------------
-        # `output.codes` holds the acoustic codec tokens.
-        # Fallback to `output.sequences` if `.codes` is missing (version diff).
-        codes = getattr(output, "codes", None)
-        if codes is None:
-            codes = getattr(output, "sequences", None)
-        if codes is None:
-            raise RuntimeError(
-                "[Audio8-TTS] Could not find codec codes in model output. "
-                f"Available keys: {list(output.keys()) if hasattr(output, 'keys') else dir(output)}"
-            )
-
-        waveforms, waveform_lengths = model.decode_audio(codes)
-
-        # waveforms shape: (batch, num_samples) — 2D mono
-        valid_len = int(waveform_lengths[0])
+        valid_len = int(lengths[0]) if lengths is not None and lengths.numel() > 0 else waveforms.shape[-1]
         audio_1d = waveforms[0, :valid_len].float().cpu()
 
-        # Clamp to [-1, 1] to avoid clipping artifacts
+        # Clamp to [-1, 1] to avoid clipping
         audio_1d = torch.clamp(audio_1d, -1.0, 1.0)
 
-        out_sr = int(model.config.codec_sample_rate)
+        out_sr = int(getattr(model.config, "codec_sample_rate", 44100))
+        # ComfyUI AUDIO shape: [B, C, S] -> [1, 1, S]
+        audio_tensor = audio_1d.unsqueeze(0).unsqueeze(0)
 
-        # ComfyUI expects: [B, C, S]
-        audio_tensor = audio_1d.unsqueeze(0).unsqueeze(0)  # [1, 1, S]
-
+        max_amp = float(audio_1d.abs().max()) if audio_1d.numel() > 0 else 0.0
+        dur_sec = audio_tensor.shape[-1] / out_sr
         print(
-            f"[Audio8-TTS] Done — {valid_len / out_sr:.2f}s @ {out_sr} Hz "
-            f"| shape={list(audio_tensor.shape)} | max_amp={audio_1d.abs().max():.4f}"
+            f"[Audio8-TTS] Done — {dur_sec:.2f}s @ {out_sr} Hz "
+            f"| shape={list(audio_tensor.shape)} | max_amp={max_amp:.4f}"
         )
         return ({"waveform": audio_tensor, "sample_rate": out_sr},)
 
