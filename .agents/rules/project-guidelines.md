@@ -78,9 +78,9 @@ Audio8 uses HuggingFace `transformers` with `trust_remote_code=True`:
 
 | Package | Purpose |
 |---------|---------|
-| `torch>=2.0.0` | Inference backend |
-| `torchaudio>=2.0.0` | Audio resampling + temp WAV save for reference audio |
-| `transformers>=4.40.0` | `AutoModel` / `AutoProcessor` for Audio8 loading |
+| `torch>=2.5.0,<3` | Inference backend |
+| `torchaudio>=2.5.0,<3` | Audio resampling + temp WAV save for reference audio |
+| `transformers>=4.57.0,<5` | `AutoModel` / `AutoProcessor` for Audio8 loading |
 | `huggingface_hub>=0.23.0` | Model download / caching |
 | `soundfile>=0.12.1` | Audio file I/O |
 | `numpy>=1.24.0` | Array utilities |
