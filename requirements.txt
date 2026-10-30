@@ -1,6 +1,8 @@
-torch>=2.0.0
-torchaudio>=2.0.0
-transformers>=4.40.0
+# NOTE: transformers 5.x produces invalid all-zero codes for Audio8's
+# custom model code, resulting in static noise. Do not relax the <5 bound.
+torch>=2.5.0,<3
+torchaudio>=2.5.0,<3
+transformers>=4.57.0,<5
 huggingface_hub>=0.23.0
 soundfile>=0.12.1
 numpy>=1.24.0

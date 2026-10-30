@@ -233,6 +233,8 @@ class Audio8TTSNode:
         valid_len = max(0, min(valid_len, waveforms.shape[-1]))
 
         # Downmix channels to mono and take first batch item -> [S]
+        # If waveforms is [B, C, S], waveforms[0] is [C, S]
+        # We want the mean across channel dimension: .mean(dim=0)
         audio_1d = waveforms[0, :, :valid_len].mean(dim=0)
 
         # Clamp to [-1, 1] to avoid clipping / clicks
