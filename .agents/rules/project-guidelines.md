@@ -42,12 +42,26 @@ comfyui_audio8_tts/
 
 ---
 
+## Inference Pipeline
+
+Audio8 uses HuggingFace `transformers` with `trust_remote_code=True`:
+
+1. `AutoProcessor.from_pretrained(repo_id, trust_remote_code=True)` — tokenises text + reference audio
+2. `AutoModel.from_pretrained(...)` loaded as `bfloat16` on CUDA, `float32` on CPU
+3. `model.generate(**inputs, return_dict_in_generate=True)` → `output.codes`
+4. `model.decode_audio(output.codes)` → `(waveforms, waveform_lengths)`
+5. Output sample rate from `model.config.codec_sample_rate`
+
+### Voice Cloning
+- Requires BOTH `reference_audio` AND `reference_text` (exact transcript)
+- Reference waveform is saved to a temp WAV via `torchaudio.save()`, passed as a file path to the processor
+- If only `reference_audio` is given without `reference_text`, a warning is logged and generation runs without cloning
+
 ## Model Caching
 
 - Module-level `_MODEL_CACHE: dict` keyed by `"<model_size>:<device>"` keeps weights in VRAM
-- `_load_model()` checks the cache before downloading
-- Weights are stored under `ComfyUI/models/TTS/Audio8-TTS-<size>/`
-- Download via `huggingface_hub.snapshot_download()`
+- `_load_model()` returns `{"processor": ..., "model": ..., "device": ...}`
+- Weights cached under `ComfyUI/models/TTS/Audio8-TTS-<size>/` via `cache_dir`
 
 ---
 
@@ -65,8 +79,10 @@ comfyui_audio8_tts/
 | Package | Purpose |
 |---------|---------|
 | `torch>=2.0.0` | Inference backend |
-| `torchaudio>=2.0.0` | Audio resampling |
-| `huggingface_hub>=0.23.0` | Model download |
+| `torchaudio>=2.0.0` | Audio resampling + temp WAV save for reference audio |
+| `transformers>=4.40.0` | `AutoModel` / `AutoProcessor` for Audio8 loading |
+| `huggingface_hub>=0.23.0` | Model download / caching |
+| `soundfile>=0.12.1` | Audio file I/O |
 | `numpy>=1.24.0` | Array utilities |
 
 ---

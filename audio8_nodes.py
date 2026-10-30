@@ -7,6 +7,7 @@ HuggingFace: https://huggingface.co/Edge0/Audio8-TTS-Realistic-0.6b
 """
 
 import os
+import tempfile
 import torch
 import torchaudio
 import folder_paths
@@ -19,31 +20,44 @@ _MODEL_CACHE: dict = {}
 
 def _get_model_dir(model_size: str) -> str:
     """Return the local directory where Audio8 weights are stored."""
-    base = (
-        folder_paths.get_folder_paths("tts")[0]
-        if "tts" in folder_paths.folder_names_and_paths
-        else os.path.join(folder_paths.models_dir, "TTS")
-    )
+    try:
+        base = folder_paths.get_folder_paths("tts")[0]
+    except Exception:
+        base = os.path.join(folder_paths.models_dir, "TTS")
     path = os.path.join(base, f"Audio8-TTS-{model_size}")
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def _load_model(model_size: str, device: torch.device):
-    """Load (or return cached) Audio8 model."""
+    """Load (or return cached) Audio8 processor + model via transformers."""
     cache_key = f"{model_size}:{device}"
     if cache_key not in _MODEL_CACHE:
-        from huggingface_hub import snapshot_download
+        from transformers import AutoModel, AutoProcessor
 
         repo_id = f"Edge0/Audio8-TTS-Realistic-{model_size}"
         local_dir = _get_model_dir(model_size)
-        print(f"[Audio8-TTS] Downloading {repo_id} → {local_dir}")
-        snapshot_download(repo_id=repo_id, local_dir=local_dir)
 
-        # TODO: replace with actual Audio8 model loading once the upstream
-        # Python SDK is published. The placeholder below stores the path so
-        # inference code can reference it.
-        _MODEL_CACHE[cache_key] = {"path": local_dir, "device": device}
+        print(f"[Audio8-TTS] Loading {repo_id} (this may take a while first time)…")
+        dtype = torch.bfloat16 if str(device) == "cuda" else torch.float32
+
+        processor = AutoProcessor.from_pretrained(
+            repo_id,
+            cache_dir=local_dir,
+            trust_remote_code=True,
+        )
+        model = (
+            AutoModel.from_pretrained(
+                repo_id,
+                cache_dir=local_dir,
+                trust_remote_code=True,
+                torch_dtype=dtype,
+            )
+            .eval()
+            .to(device)
+        )
+
+        _MODEL_CACHE[cache_key] = {"processor": processor, "model": model, "device": device}
         print(f"[Audio8-TTS] Model ready on {device}")
 
     return _MODEL_CACHE[cache_key]
@@ -72,10 +86,23 @@ class Audio8TTSNode:
                     "FLOAT",
                     {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.05},
                 ),
+                "temperature": (
+                    "FLOAT",
+                    {"default": 0.8, "min": 0.1, "max": 1.5, "step": 0.05},
+                ),
+                "max_new_tokens": (
+                    "INT",
+                    {"default": 1024, "min": 128, "max": 4096, "step": 128},
+                ),
             },
             "optional": {
                 # ComfyUI AUDIO dict: {"waveform": Tensor[B,C,S], "sample_rate": int}
                 "reference_audio": ("AUDIO",),
+                # Exact transcript of the reference_audio clip (required for voice cloning)
+                "reference_text": (
+                    "STRING",
+                    {"multiline": True, "default": ""},
+                ),
             },
         }
 
@@ -83,7 +110,10 @@ class Audio8TTSNode:
     RETURN_NAMES = ("audio",)
     FUNCTION = "generate"
     CATEGORY = "Audio8-TTS"
-    DESCRIPTION = "Text-to-speech synthesis using the Audio8 DualAR model."
+    DESCRIPTION = (
+        "Text-to-speech synthesis using the Audio8 DualAR model. "
+        "Connect reference_audio + reference_text for zero-shot voice cloning."
+    )
 
     def generate(
         self,
@@ -91,43 +121,83 @@ class Audio8TTSNode:
         model_size: str,
         language: str,
         speed: float,
+        temperature: float,
+        max_new_tokens: int,
         reference_audio=None,
+        reference_text: str = "",
     ):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = _load_model(model_size, device)
+        cache = _load_model(model_size, device)
+        processor = cache["processor"]
+        model = cache["model"]
 
         # ------------------------------------------------------------------
-        # Reference audio for zero-shot voice cloning
+        # Build processor inputs
         # ------------------------------------------------------------------
-        ref_waveform = None
-        if reference_audio is not None:
-            waveform = reference_audio["waveform"]  # [B, C, S]
+        use_cloning = reference_audio is not None and reference_text.strip()
+
+        if use_cloning:
+            # Save reference waveform to a temp WAV so the processor can read it
+            waveform = reference_audio["waveform"]   # [B, C, S]
             sr = reference_audio["sample_rate"]
-            if sr != 44100:
-                waveform = torchaudio.functional.resample(waveform, sr, 44100)
-            ref_waveform = waveform.to(device)
+
+            # Flatten to mono [S] for saving
+            wav_mono = waveform[0].mean(dim=0).cpu().float()
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            torchaudio.save(tmp_path, wav_mono.unsqueeze(0), sr)
+
+            print(
+                f"[Audio8-TTS] Zero-shot cloning | ref_text='{reference_text[:60]}…'"
+            )
+            inputs = processor(
+                text=[text],
+                reference_audio=[tmp_path],
+                reference_text=[reference_text.strip()],
+                return_tensors="pt",
+            )
+            os.unlink(tmp_path)
+        else:
+            if reference_audio is not None and not reference_text.strip():
+                print(
+                    "[Audio8-TTS] WARNING: reference_audio provided but reference_text is empty — "
+                    "running without voice cloning. Add the exact transcript for cloning."
+                )
+            print(f"[Audio8-TTS] Generating speech (no voice cloning)")
+            inputs = processor(
+                text=[text],
+                return_tensors="pt",
+            )
+
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
         # ------------------------------------------------------------------
-        # Inference
-        # TODO: replace the stub below with the real Audio8 inference call
-        # once the upstream Python SDK is available:
-        #
-        #   audio_np, out_sr = model["pipeline"].synthesize(
-        #       text=text,
-        #       language=language,
-        #       speed=speed,
-        #       voice_prompt=ref_waveform,
-        #   )
-        #   audio_tensor = torch.from_numpy(audio_np).unsqueeze(0).unsqueeze(0)
+        # Generate
         # ------------------------------------------------------------------
-        print(
-            f"[Audio8-TTS] Generating speech | model={model_size} lang={language} "
-            f"speed={speed} ref={'yes' if ref_waveform is not None else 'no'}"
-        )
-        out_sr = 44100
-        # Placeholder: 2-second silent tensor (remove once real SDK is wired)
-        audio_tensor = torch.zeros((1, 1, out_sr * 2), dtype=torch.float32)
+        print(f"[Audio8-TTS] Synthesising… lang={language} speed={speed} temp={temperature}")
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=0.95,
+                top_k=50,
+                do_sample=True,
+                return_dict_in_generate=True,
+            )
 
+        # ------------------------------------------------------------------
+        # Decode to waveform
+        # ------------------------------------------------------------------
+        waveforms, waveform_lengths = model.decode_audio(output.codes)
+        audio_np = waveforms[0, : int(waveform_lengths[0])].float().cpu().numpy()
+
+        out_sr = model.config.codec_sample_rate
+        # Shape expected by ComfyUI: [B, C, S]
+        audio_tensor = torch.from_numpy(audio_np).unsqueeze(0).unsqueeze(0)
+
+        print(f"[Audio8-TTS] Done — {audio_tensor.shape[-1] / out_sr:.2f}s @ {out_sr} Hz")
         return ({"waveform": audio_tensor, "sample_rate": out_sr},)
 
 
@@ -169,4 +239,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Audio8TTSNode": "Audio8 Text-to-Speech",
     "Audio8ModelLoaderNode": "Audio8 Model Loader",
 }
-
